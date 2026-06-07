@@ -6,12 +6,23 @@ from bs4 import BeautifulSoup
 import os
 import json
 
-# --- 1. 初始化 Firebase ---
+# --- 1. 初始化 Firebase (絕對路徑防錯版) ---
+# 自動鎖定 app.py 旁邊的金鑰，防止因為工作目錄錯誤而找不到檔案
+current_dir = os.path.dirname(os.path.abspath(__file__))
+local_key_path = os.path.join(current_dir, 'serviceAccountKey.json')
+
 if not firebase_admin._apps:
     firebase_config = os.getenv('FIREBASE_CONFIG')
     if firebase_config:
         cred = credentials.Certificate(json.loads(firebase_config))
         firebase_admin.initialize_app(cred)
+        print("🚀 Firebase 透過環境變數初始化成功！")
+    elif os.path.exists(local_key_path):  
+        cred = credentials.Certificate(local_key_path)
+        firebase_admin.initialize_app(cred)
+        print("📂 Firebase 透過本地 serviceAccountKey.json 成功連線！")
+    else:
+        print("🚨 警告：未找到 Firebase 設定，請確認環境變數或 serviceAccountKey.json 檔案")
 
 app = Flask(__name__)
 
@@ -20,10 +31,14 @@ app = Flask(__name__)
 def home():
     return "小組期末報告：小說推薦機器人後台網頁伺服器已成功啟動！"
 
-# --- 3. 小說爬蟲函式 (全面優化網頁解析結構，確保不為 0 筆) ---
+# --- 3. 小說爬蟲函式 (完美對齊楊子青老師版本 7 寫法) ---
 @app.route("/crawl")
 def run_spider():
-    db = firestore.client()
+    try:
+        db = firestore.client()
+    except Exception as e:
+        return f"Firebase 未成功初始化，請檢查金鑰設定。錯誤: {e}"
+
     url = "https://www.xjjxs.com/"
     
     # 模擬真人瀏覽器，防止網站拒絕連線
@@ -38,10 +53,12 @@ def run_spider():
         
         soup = BeautifulSoup(res.text, "html.parser")
         
-        # 擴大搜尋範圍：同時抓取該網站首頁最常見的小說區塊標籤
+        # 抓取該網站首頁最常見的小說區塊標籤 (對齊老師投影片 slide 1)
         items = soup.select("div.item, div.top, li")
         
         count = 0
+        seen_links = set()  # 用來記錄這一輪已經抓過的網址，雙重防重機制
+        
         for item in items:
             # 尋找含有小說連結與標題的 a 標籤
             a_tag = item.find("a", href=True)
@@ -52,21 +69,35 @@ def run_spider():
             title = a_tag.get("title") or a_tag.text.strip()
             link = a_tag.get("href")
             
-            # 過濾掉不是小說頁面的非必要連結（例如分類按鈕、首頁按鈕、服務條款等）
-            if not link or "book" not in link and "download" not in link and ".html" not in link:
+            # 過濾掉不是小說頁面的非必要連結
+            if not link or ("book" not in link and "download" not in link and ".html" not in link):
                 continue
                 
             if title and title != "" and len(title) < 30:  # 避免抓到整段長文章
                 # 補全相對路徑網址
                 if link.startswith("/"):
-                    link = "https://www.xjjxs.com" + link
+                    hyperlink = "https://www.xjjxs.com" + link
+                else:
+                    hyperlink = link
                 
-                # 動態抓取狀態或隨機配置（迎合學長姐的四大欄位需求）
+                if hyperlink in seen_links:
+                    continue
+                seen_links.add(hyperlink)
+                
+                # ==================================================================
+                # ✨ 核心技術：仿照老師投影片 slide 2 萃取唯一 ID (movie_id) 的手法
+                # 從小說網址（例如 /book/12345.html）切出 "12345" 作為自訂唯一 ID
+                # ==================================================================
+                novel_id = hyperlink.split("/")[-1].replace(".html", "").replace("book", "").replace("download", "")
+                if not novel_id:
+                    novel_id = title  # 防呆：若切不出來就用書名當 ID
+                
+                # 動態抓取狀態並清洗 (對齊老師投影片的資料清洗)
                 status_tag = item.find("span") or item.find("em")
                 status = status_tag.text.strip() if status_tag else "連載中"
                 if "完" in status or "全" in status:
                     status = "已完結"
-                elif "連" in status or "著" in status:
+                else:
                     status = "連載中"
                 
                 # 動態抓取作者
@@ -82,27 +113,29 @@ def run_spider():
                 elif "武俠" in title or "修真" in title:
                     genre = "武俠仙俠"
                 
-                # ====== 完全採用學長姐圖一的資料庫輸入寫法 ======
+                # ==================================================================
+                # ✨ 核心技術：完全採用老師投影片 slide 3 的 doc 封裝與指定 ID 寫入法
+                # ==================================================================
                 doc = {
                     "title": title,
                     "author": author,
                     "status": status,
                     "genre": genre,
-                    "hyperlink": link
+                    "hyperlink": hyperlink
                 }
                 
-                # 自動產生亂碼 ID
-                doc_ref = db.collection("小說資料庫").document()
+                # 使用剛才切出來的 novel_id，重複執行時會自動覆蓋更新，達成冪等性 (Idempotence)
+                doc_ref = db.collection("小說資料庫").document(novel_id)
                 doc_ref.set(doc)
-                # ==================================================
+                # ==================================================================
                 
                 count += 1
                 
-                # 限制首頁先抓 15-20 筆精彩資料即可，避免 Vercel 執行逾時
+                # 限制首頁先抓 20 筆，避免 Vercel 執行逾時
                 if count >= 20:
                     break
                     
-        return f"小說爬蟲及存檔完畢，已成功精確抓取並新增 {count} 筆小說資料到 Firebase 小說資料庫！"
+        return f"小說爬蟲及存檔完畢，已成功精確抓取並新增/覆蓋更新 {count} 筆小說資料到 Firebase 小說資料庫！"
         
     except Exception as e:
         return f"爬蟲發生錯誤: {e}"
@@ -120,18 +153,38 @@ def webhook():
         status = parameters.get("status", "")  
         genre = parameters.get("genre", "")    
         
-        db = firestore.client()
-        docs = db.collection("小說資料庫").where("status", "==", status).get()
-        
-        result = f"我是我們小組開發的小說推薦機器人，您選擇的小說狀態是【{status}】：\n\n"
-        count = 0
-        for doc in docs:
-            d = doc.to_dict()
-            if genre == "" or genre in d.get("genre", ""):
-                result += f"📖 書名：{d['title']}\n✍️ 作者：{d['author']}\n🏷️ 分類：{d['genre']}\n🔗 連結：{d['hyperlink']}\n\n"
-                count += 1
+        try:
+            db = firestore.client()
             
-        info = result if count > 0 else f"目前資料庫中沒有符合【{status}】的小說資料。"
+            # 優化：動態查詢。如果 Dialogflow 沒有傳送狀態，就讀取全部
+            if status:
+                query_ref = db.collection("小說資料庫").where("status", "==", status)
+            else:
+                query_ref = db.collection("小說資料庫")
+                
+            docs = query_ref.get()
+            
+            status_display = status if status else "未指定狀態"
+            result = f"我是我們小組開發的小說推薦機器人，您選擇的小說狀態是【{status_display}】"
+            if genre:
+                result += f"、分類是【{genre}】"
+            result += "：\n\n"
+            
+            count = 0
+            for doc in docs:
+                d = doc.to_dict()
+                # 第二層分類過濾（支援模糊比對）
+                if not genre or genre in d.get("genre", ""):
+                    result += f"📖 書名：{d.get('title', '無題')}\n✍️ 作者：{d.get('author', '佚名')}\n🏷️ 分類：{d.get('genre', '未分類')}\n🔗 連結：{d.get('hyperlink', '#')}\n\n"
+                    count += 1
+            
+            if count > 0:
+                info = result
+            else:
+                info = f"目前資料庫中沒有符合【狀態：{status_display} / 分類：{genre if genre else '未指定'}】的小說資料。"
+                
+        except Exception as e:
+            info = f"資料庫查詢時發生錯誤: {e}"
 
     return make_response(jsonify({"fulfillmentText": info}))
 
