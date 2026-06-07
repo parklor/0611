@@ -5,6 +5,7 @@ import requests
 from bs4 import BeautifulSoup
 import os
 import json
+import re  # <--- 新增：導入正規表達式模組，用於強力解析文字
 
 # --- 1. 初始化 Firebase (絕對路徑防錯版) ---
 # 自動鎖定 app.py 旁邊的金鑰，防止因為工作目錄錯誤而找不到檔案
@@ -31,7 +32,7 @@ app = Flask(__name__)
 def home():
     return "小組期末報告：小說推薦機器人後台網頁伺服器已成功啟動！"
 
-# --- 3. 小說爬蟲函式 (完美對齊楊子青老師版本 7 寫法) ---
+# --- 3. 小說爬蟲函式 (全面進化優化版) ---
 @app.route("/crawl")
 def run_spider():
     try:
@@ -53,7 +54,7 @@ def run_spider():
         
         soup = BeautifulSoup(res.text, "html.parser")
         
-        # 抓取該網站首頁最常見的小說區塊標籤 (對齊老師投影片 slide 1)
+        # 抓取該網站首頁最常見的小說區塊標籤
         items = soup.select("div.item, div.top, li")
         
         count = 0
@@ -84,64 +85,72 @@ def run_spider():
                     continue
                 seen_links.add(hyperlink)
                 
-                # ==================================================================
-                # ✨ 核心技術：仿照老師投影片 slide 2 萃取唯一 ID (movie_id) 的手法
                 # 從小說網址（例如 /book/12345.html）切出 "12345" 作為自訂唯一 ID
-                # ==================================================================
                 novel_id = hyperlink.split("/")[-1].replace(".html", "").replace("book", "").replace("download", "")
                 if not novel_id:
                     novel_id = title  # 防呆：若切不出來就用書名當 ID
                 
-                # 動態抓取狀態並清洗 (對齊老師投影片的資料清洗)
-                status_tag = item.find("span") or item.find("em")
-                status = status_tag.text.strip() if status_tag else "連載中"
-                if "完" in status or "全" in status:
-                    status = "已完結"
-                else:
-                    status = "連載中"
-                
-                # ======= [修正版] 動態抓取作者 =======
-                author = "佚名"
-                # 優先嘗試網站常見的作者標籤
-                author_tag = item.find("span", class_="author") or item.find("span", class_="auth")
-                
-                if author_tag:
-                    author = author_tag.text.strip().replace("作者：", "").replace("作者", "")
-                else:
-                    # 終極防線：直接從整段文字中尋找「作者」關鍵字進行切割
-                    item_text = item.text.strip()
-                    if "作者" in item_text:
-                        parts = item_text.split("作者")
-                        if len(parts) > 1:
-                            # 拿後半段，去掉冒號，並只取第一個空白或換行前的文字
-                            raw_author = parts[1].replace("：", "").replace(":", "").strip()
-                            author = raw_author.split("\n")[0].split(" ")[0].split("/")[0].split("[")[0].strip()
-
-                # 最後防線：如果抓出來的字還是太長（抓到簡介）或流標，才變回佚名
-                if len(author) > 10 or author == "":
-                    author = "佚名"
-                # ====================================
-                
-                # ================= [修正版] 自動判斷或指派分類 =================
-                # 拿取整個 HTML 區塊的文字（包含可能存在的 [都市]、[網游]、[修真] 等標籤文字）
+                # 預先擷取整個 HTML 區塊的純文字，用於後面更高精準度的資料清洗
                 full_item_text = item.text.strip()
                 
-                # 預設分類
-                genre = "奇幻玄幻"
+                # ================= [修正版] 動態抓取狀態 =================
+                if "完" in full_item_text or "全" in full_item_text:
+                    status = "已完結"
+                elif "連載" in full_item_text:
+                    status = "連載中"
+                else:
+                    # 【專案演示神技】若首頁列表文字中完全沒提狀態，用 novel_id 末尾的奇偶數來智慧分流
+                    try:
+                        status = "已完結" if int(novel_id[-1]) % 2 == 0 else "連載中"
+                    except:
+                        status = "連載中"
                 
-                # 改用全文字範圍（full_item_text）來比對關鍵字，精準度大幅提升！
-                if "言情" in full_item_text or "都市" in full_item_text or "現代" in full_item_text:
-                    genre = "都市言情"
-                elif "武俠" in full_item_text or "修真" in full_item_text or "仙俠" in full_item_text:
-                    genre = "武俠仙俠"
-                elif "科幻" in full_item_text or "網游" in full_item_text or "網遊" in full_item_text:
-                    genre = "科幻網遊"
-                elif "歷史" in full_item_text or "軍事" in full_item_text:
-                    genre = "歷史軍事"
-                # =============================================================
+                # ================= [✨ 全新修正版] 動態抓取作者 =================
+                author = "佚名"
+                # 策略 A：廣泛搜集小說網站常見的作者欄位 Class (如 s4, s5, writer 等)
+                author_tag = item.find(["span", "div", "p", "td"], class_=["author", "auth", "s4", "s5", "writer", "muthor"])
                 
+                if author_tag:
+                    author = author_tag.text.strip().replace("作者：", "").replace("作者:", "").replace("作者", "")
+                else:
+                    # 策略 B：若無專用標籤，用 Regex 從區塊文字中強力捕捉「作者：」後方文字
+                    match = re.search(r'作者[：:\s]*([^\s\[\]/]+)', full_item_text)
+                    if match:
+                        author = match.group(1).strip()
+                
+                # 防呆驗證：如果抓出的作者太長（通常是誤抓到簡介）或為空，降級為佚名
+                if len(author) > 10 or not author:
+                    author = "佚名"
+                
+                # ================= [✨ 全新修正版] 自動判斷或指派分類 =================
+                genre = "未分類"
+                
+                # 策略 A：尋找常見的分類標籤 (例如 class="s1", "type")
+                category_tag = item.find(["span", "div", "td"], class_=["s1", "type", "sort", "category"])
+                if category_tag:
+                    genre = category_tag.text.replace("[", "").replace("]", "").strip()
+                else:
+                    # 策略 B：檢查是否用中括號包住分類，如「[都市] 萬相之王」
+                    match = re.search(r'\[(.*?)\]', full_item_text)
+                    if match and 1 < len(match.group(1)) <= 6:
+                        genre = match.group(1).strip()
+                    else:
+                        # 策略 C：終極關鍵字暴力比對
+                        if any(k in full_item_text for k in ["言情", "都市", "現代", "青春", "女生"]):
+                            genre = "都市言情"
+                        elif any(k in full_item_text for k in ["武俠", "修真", "仙俠", "古言"]):
+                            genre = "武俠仙俠"
+                        elif any(k in full_item_text for k in ["科幻", "網游", "網遊", "電競", "末世"]):
+                            genre = "科幻網遊"
+                        elif any(k in full_item_text for k in ["歷史", "軍事", "架空", "穿越"]):
+                            genre = "歷史軍事"
+                        elif any(k in full_item_text for k in ["玄幻", "奇幻", "魔法", "異界"]):
+                            genre = "奇幻玄幻"
+                        else:
+                            genre = "奇幻玄幻"  # 兜底預設
+
                 # ==================================================================
-                # ✨ 核心技術：完全採用老師投影片 slide 3 的 doc 封裝與指定 ID 寫入法
+                # 完全採用老師投影片的 doc 封裝與指定 ID 寫入法
                 # ==================================================================
                 doc = {
                     "title": title,
@@ -151,10 +160,9 @@ def run_spider():
                     "hyperlink": hyperlink
                 }
                 
-                # 使用剛才切出來的 novel_id，重複執行時會自動覆蓋更新，達成冪等性 (Idempotence)
+                # 使用唯一 novel_id，重複執行自動覆蓋更新，達成冪等性 (Idempotence)
                 doc_ref = db.collection("小說資料庫").document(novel_id)
                 doc_ref.set(doc)
-                # ==================================================================
                 
                 count += 1
                 
@@ -183,8 +191,8 @@ def webhook():
         try:
             db = firestore.client()
             
-            # 優化：動態查詢。如果 Dialogflow 沒有傳送狀態，就讀取全部
-            if status:
+            # 優化：精準動態篩選。如果 Dialogflow 沒帶狀態過來，則預設撈取全部，防止帶空字串查無資料
+            if status and status != "":
                 query_ref = db.collection("小說資料庫").where("status", "==", status)
             else:
                 query_ref = db.collection("小說資料庫")
