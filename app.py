@@ -100,18 +100,45 @@ def run_spider():
                 else:
                     status = "連載中"
                 
-                # 動態抓取作者
-                author_tag = item.find("span", class_="author") or item.find("p")
-                author = author_tag.text.strip().replace("作者：", "") if author_tag else "佚名"
-                if len(author) > 10 or author == "": 
-                    author = "佚名"
+                # ======= [修正版] 動態抓取作者 =======
+                author = "佚名"
+                # 優先嘗試網站常見的作者標籤
+                author_tag = item.find("span", class_="author") or item.find("span", class_="auth")
                 
-                # 自動判斷或指派分類
+                if author_tag:
+                    author = author_tag.text.strip().replace("作者：", "").replace("作者", "")
+                else:
+                    # 終極防線：直接從整段文字中尋找「作者」關鍵字進行切割
+                    item_text = item.text.strip()
+                    if "作者" in item_text:
+                        parts = item_text.split("作者")
+                        if len(parts) > 1:
+                            # 拿後半段，去掉冒號，並只取第一個空白或換行前的文字
+                            raw_author = parts[1].replace("：", "").replace(":", "").strip()
+                            author = raw_author.split("\n")[0].split(" ")[0].split("/")[0].split("[")[0].strip()
+
+                # 最後防線：如果抓出來的字還是太長（抓到簡介）或流標，才變回佚名
+                if len(author) > 10 or author == "":
+                    author = "佚名"
+                # ====================================
+                
+                # ================= [修正版] 自動判斷或指派分類 =================
+                # 拿取整個 HTML 區塊的文字（包含可能存在的 [都市]、[網游]、[修真] 等標籤文字）
+                full_item_text = item.text.strip()
+                
+                # 預設分類
                 genre = "奇幻玄幻"
-                if "言情" in title or "都市" in title:
+                
+                # 改用全文字範圍（full_item_text）來比對關鍵字，精準度大幅提升！
+                if "言情" in full_item_text or "都市" in full_item_text or "現代" in full_item_text:
                     genre = "都市言情"
-                elif "武俠" in title or "修真" in title:
+                elif "武俠" in full_item_text or "修真" in full_item_text or "仙俠" in full_item_text:
                     genre = "武俠仙俠"
+                elif "科幻" in full_item_text or "網游" in full_item_text or "網遊" in full_item_text:
+                    genre = "科幻網遊"
+                elif "歷史" in full_item_text or "軍事" in full_item_text:
+                    genre = "歷史軍事"
+                # =============================================================
                 
                 # ==================================================================
                 # ✨ 核心技術：完全採用老師投影片 slide 3 的 doc 封裝與指定 ID 寫入法
