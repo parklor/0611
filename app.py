@@ -31,7 +31,7 @@ app = Flask(__name__)
 def home():
     return "小組期末報告：小說推薦機器人後台網頁伺服器已成功啟動！"
 
-# --- 3. 小說爬蟲函式 (智慧型防噪進化版 - 已拔除分類) ---
+# --- 3. 小說爬蟲函式 ---
 @app.route("/crawl")
 def run_spider():
     try:
@@ -49,11 +49,10 @@ def run_spider():
         res.encoding = res.apparent_encoding if res.apparent_encoding else 'gbk'
         soup = BeautifulSoup(res.text, "html.parser")
         
-        # 抓取該網站首頁的小說區塊標籤
         items = soup.select("div.item, div.top, li")
         
         count = 0
-        seen_links = set()  # 防止重複抓取
+        seen_links = set()
         
         for item in items:
             a_tag = item.find("a", href=True)
@@ -63,34 +62,29 @@ def run_spider():
             title = a_tag.get("title") or a_tag.text.strip()
             link = a_tag.get("href")
             
-            # 過濾非小說頁面的無效連結
             if not link or ("book" not in link and "download" not in link and ".html" not in link):
                 continue
                 
             if title and title != "" and len(title) < 30:
-                # 補全網址
                 hyperlink = "https://www.xjjxs.com" + link if link.startswith("/") else link
                 
                 if hyperlink in seen_links:
                     continue
                 
-                # 擷取該區塊的所有純文字
                 full_item_text = item.text.strip()
                 
-                # ================= [🔥 關鍵修正] 排除無效純連結區塊 =================
-                # 如果區塊內文字跟書名一模一樣，代表這是導覽列或側邊欄排行（本來就沒寫作者與其他資訊）
+                # 排除無效純連結區塊
                 if full_item_text == title or len(full_item_text) <= len(title) + 2:
                     if "[" not in full_item_text:  
                         continue
 
                 seen_links.add(hyperlink)
                 
-                # 切出唯一 ID
                 novel_id = hyperlink.split("/")[-1].replace(".html", "").replace("book", "").replace("download", "")
                 if not novel_id:
                     novel_id = title
                 
-                # ================= [修正版] 動態抓取狀態 =================
+                # ================= 奇偶數分流狀態機制 =================
                 if "完" in full_item_text or "全" in full_item_text:
                     status = "已完結"
                 elif "連載" in full_item_text:
@@ -101,21 +95,18 @@ def run_spider():
                     except:
                         status = "連載中"
 
-                # ================= [🔥 關鍵修正] 智慧型解析作者 =================
+                # ================= 智慧型解析作者 =================
                 author = "佚名"
                 
-                # 策略 A：尋找有明確 class 的作者標籤
                 author_tag = item.find(["span", "div", "p", "td"], class_=["author", "auth", "s4", "s5", "writer"])
                 if author_tag:
                     author = author_tag.text.strip().replace("作者：", "").replace("作者:", "").replace("作者", "")
                 
-                # 策略 B：若無標籤但文字含有「作者：」字樣，用 Regex 抓取
                 if author == "佚名":
                     match = re.search(r'作者[：:\s]*([^\s\[\]/|]+)', full_item_text)
                     if match:
                         author = match.group(1).strip()
                 
-                # 策略 C：位置特徵法（針對標準列表排版：分類 書名 最新章節 作者 更新時間）
                 if author == "佚名":
                     spans = [s.text.strip() for s in item.find_all("span") if s.text.strip()]
                     if len(spans) >= 4:
@@ -126,7 +117,6 @@ def run_spider():
                     elif len(spans) == 3:
                         author = spans[2]
                 
-                # 策略 D：符號切割法
                 if author == "佚名" and "/" in full_item_text:
                     parts = full_item_text.split("/")
                     possible_author = parts[-1].strip()
@@ -135,14 +125,11 @@ def run_spider():
                     if 0 < len(possible_author) <= 8:
                         author = possible_author
 
-                # 清除作者名稱中殘留的雜質符號
                 author = author.replace("[", "").replace("]", "").replace("(", "").replace(")", "").strip()
                 if len(author) > 10 or not author or author == title or any(k in author for k in ["章", "集", "頁", "最新", "更新"]):
                     author = "佚名"
 
-                # ==================================================================
-                # 封裝並寫入 Firebase (已移除了 "genre" 欄位)
-                # ==================================================================
+                # 封裝寫入 Firebase
                 doc = {
                     "title": title,
                     "author": author,
@@ -162,7 +149,7 @@ def run_spider():
     except Exception as e:
         return f"爬蟲發生錯誤: {e}"
 
-# --- 4. Webhook 主程式 (接收 Dialogflow 指令 - 已拔除分類篩選) ---
+# --- 4. Webhook 主程式 (🔥 完美對齊 rate1 參數版) ---
 @app.route("/webhook", methods=["POST"])
 def webhook():
     req = request.get_json(force=True)
@@ -172,25 +159,41 @@ def webhook():
     info = "抱歉，系統無法辨識您的指令。"
 
     if action == "genreChoice":
-        status = parameters.get("status", "")  # 只獲取狀態，不再獲取 genre
+        # ======= 核心修正：精準對應你 Dialogflow 的 PARAMETER NAME 'rate1' =======
+        status_raw = parameters.get("rate1") or parameters.get("status") or ""
+        
+        # 串列自動解包（防呆）
+        if isinstance(status_raw, list) and len(status_raw) > 0:
+            status_raw = status_raw[0]
+            
+        status_raw = str(status_raw).strip()
+        
+        # 模糊字串強制校正，完美對齊資料庫
+        status = ""
+        if "連載" in status_raw:
+            status = "連載中"
+        elif "完" in status_raw or "全" in status_raw:
+            status = "已完結"
         
         try:
             db = firestore.client()
             
-            if status and status != "":
+            if status:
+                # 精準過濾：只抓符合狀態的小說
                 query_ref = db.collection("小說資料庫").where("status", "==", status)
+                status_display = status
             else:
+                # 如果真的還是空的，提示目前的參數狀況
                 query_ref = db.collection("小說資料庫")
+                status_display = "未指定狀態 (請至 Dialogflow 確認)"
                 
             docs = query_ref.get()
             
-            status_display = status if status else "未指定狀態"
             result = f"我是我們小組開發的小說推薦機器人，您選擇的小說狀態是【{status_display}】：\n\n"
             
             count = 0
             for doc in docs:
                 d = doc.to_dict()
-                # 移除分類的顯示，只呈現 書名、作者、連結
                 result += f"📖 書名：{d.get('title', '無題')}\n✍️ 作者：{d.get('author', '佚名')}\n🔗 連結：{d.get('hyperlink', '#')}\n\n"
                 count += 1
             
